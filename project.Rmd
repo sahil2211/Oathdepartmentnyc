@@ -1,0 +1,369 @@
+---
+title: "Project Report Code"
+author: "sahil"
+date: "October 19, 2016"
+output: 
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+setwd("/home/sahil/Documents/FDS/project/ExternalFactorEffectOnOATHHearing/")
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,warning = F)
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+#Data Cleaning and Transformation
+First we load the dataset for the year of 2015. We have added an extra column which signifies whether the violation is related to sanitation or not.    
+```{r cars}
+library(chron)
+library(lubridate)
+library(caret)
+
+#df <- read.csv("https://s3-us-west-2.amazonaws.com/fds2016sahil/default2015+(1).csv",na.strings=c("","NA"))
+
+df <- read.table("data.txt")
+#only select the rows where decision hearing result is either against the respondent("IN VIOLATION") 
+#or for the respondent("DISMISSED")
+selected <- c("DISMISSED","IN VIOLATION")
+df1 <- df[df$Hearing.Result %in% selected,]
+df_unique <- unique(df$Issuing.Agency)
+indx <- sapply(df1, is.factor) 
+#remove dollar sign
+df1[indx] <- lapply(df1[indx], function(x) 
+                            as.character(gsub("\\$", "", x)))
+#convert every column to factor
+df1<-data.frame(lapply(df1,factor))
+#convert date time to Datetime Format
+df1$Violation.Date<- as.Date(df1$Violation.Date, "%m/%d/%Y")
+df1$Violation.Time <- chron(times. = df1$Violation.Time)
+
+
+newdf <- data.frame(df1[,c("Violation.Date","Violation.Time","Issuing.Agency","Violation.Location..Borough.", "Hearing.Result", "Hearing.Date", "Total.Violation.Amount", "Scheduled.Hearing.Location", "Hearing.Time", "Compliance.Status" )])
+#convert hearing date and time to date time format
+newdf$Hearing.Time <- chron(times. = newdf$Hearing.Time)
+newdf$Hearing.Date <- as.Date(newdf$Hearing.Date,"%m/%d/%Y")
+#remove Issuing Agency, Hearing Location and Violation Locations whose violations are less than 500,10,150
+newdf <- newdf[!(as.numeric(newdf$Issuing.Agency) %in% which(table(newdf$Issuing.Agency)<500)),]
+newdf <- newdf[!(as.numeric(newdf$Scheduled.Hearing.Location) %in% which(table(newdf$Scheduled.Hearing.Location)<10)),]
+newdf <- newdf[!(as.numeric(newdf$Violation.Location..Borough.) %in% which(table(newdf$Violation.Location..Borough.)<150)),]
+newdf <- droplevels(newdf)
+#convert Violation Amount to numeric 
+newdf$Total.Violation.Amount <- as.numeric(as.character(newdf$Total.Violation.Amount))
+set.seed(22)
+pIndex <- createDataPartition(newdf$Issuing.Agency, p = .1,
+                                  list = FALSE,
+                                  times = 1)
+
+```
+      
+In our initial exploration of which predictors to use we find that Violation Time, Issuing Agency, Violation Location, Hearing Location, Violation Time and Total Violation Amount have highest coefficient values.    
+```{r}
+newdf <- newdf[pIndex,]
+model1 <-glm(Hearing.Result~.,data = newdf,family = 'binomial')
+summary(model1)
+```
+
+We select the predictor columns and put into new dataframe and then replace missing values with modes as knn doesn't remove missing values by default.       
+```{r}
+
+sampledf<-newdf[ , -which(names(newdf) %in% c("Respondent.Last.Name","Balance.Due","Violation.Date", "Violation.Time", "Violation.Details","Paid.Amount","Charge..1..Code.Description", "Compliance.Status","Hearing.Date.1","Violation.Location..Zip.Code.","Hearing.Date","Penalty.Imposed"))]
+sampledf <- droplevels(sampledf)
+
+Mode <- function (x, na.rm) {
+    xtab <- table(x)
+    xmode <- names(which(xtab == max(xtab)))
+    if (length(xmode) > 1) xmode <- ">1 mode"
+    return(xmode)
+}
+#impute missing values with mode...
+for (var in 1:ncol(sampledf)) {
+  sampledf[is.na(sampledf[,var]),var] <- Mode(sampledf[,var], na.rm = TRUE)
+}
+
+
+sampledf$Total.Violation.Amount <- as.numeric(sampledf$Total.Violation.Amount)
+```
+ 
+#Model      
+Next we start with implementing the algorithms by first splitting the data into 10 folds for k-fold cross validation. Iteratively each fold is used as test set and remaining 9 are used as train. We find accuracy and execution time for each fold.  
+             
+##K-NN Classification 
+```{r}
+require(class)
+require(knncat)
+idx <- createFolds(sampledf$Hearing.Result,k = 10)
+sapply(idx, length)
+accuracy <- vector()
+timeknn <- vector()
+for (i in 1:10) {
+  start.time <- Sys.time()
+  #knncat tests for each k value given and selects the model with best k value.   
+  model <- knncat(sampledf[ -idx[[i]] , ], sampledf[ idx[[i]], ], k=c(1,3,5,7,9,11,13,15,19),classcol = 3)
+  end.time <- Sys.time()
+  timeknn[i]<-end.time - start.time
+  pred <- predict(model,sampledf[ -idx[[i]] , ],sampledf[ idx[[i]], ],train.classcol = 3,newdata.classcol = 3)
+  cm <-table(pred,sampledf[ idx[[i]], ]$Hearing.Result)
+  accuracy[i]<-sum(diag(cm))/sum(cm)
+}
+cm
+```
+
+       
+                        
+##Linear Regression
+We carry out similar  steps for regression.   
+```{r}
+accuracylm <- vector()
+timelm <- vector()
+for (i in 1:10) {
+  start.time <- Sys.time()
+  model <-glm(Hearing.Result~.,family = binomial,data =sampledf[ -idx[[i]] , ] )
+  end.time <- Sys.time()
+  timelm[i]<-end.time - start.time
+  pred <- predict(model,sampledf[ idx[[i]], ],type = 'response')
+  cm <- table(sampledf[ idx[[i]], ]$Hearing.Result, pred>0.5)
+
+  accuracylm[i]<-sum(diag(cm))/sum(cm)
+}
+cm
+```
+                              
+##Random Forests
+
+We carry out similar  steps for Random Forests.   
+
+```{r}
+library(randomForest)
+accuracyrf <- vector()
+timerf <- vector()
+for (i in 1:10) {
+  start.time <- Sys.time()
+  rf <-randomForest(Hearing.Result~.,data =sampledf[ -idx[[i]] , ] ,importance = TRUE)
+  end.time <- Sys.time()
+  timerf[i]<-end.time - start.time
+  pred <- predict(rf,sampledf[ idx[[i]], ])
+  cm <- table(sampledf[ idx[[i]], ]$Hearing.Result, pred)
+  accuracyrf[i]<-sum(diag(cm))/sum(cm)
+}
+cm
+```
+###Importance Plots.    
+The mean decrease in accuracy a variable causes is determined during the out of bag error calculation phase. The more the accuracy of the random forest decreases due to the exclusion (or permutation) of a single variable, the more important that variable is deemed, and therefore variables with a large mean decrease in accuracy are more important for classification of the data. The mean decrease in Gini coefficient is a measure of how each variable contributes to the homogeneity of the nodes and leaves in the resulting random forest. Each time a particular variable is used to split a node, the Gini coefficient for the child nodes are calculated and compared to that of the original node. The Gini coefficient is a measure of homogeneity from 0 (homogeneous) to 1 (heterogeneous). The changes in Gini are summed for each variable and normalized at the end of the calculation. Variables that result in nodes with higher purity have a higher decrease in Gini coefficient.    
+
+A type 1 variable importance plot shows the mean decrease in accuracy, while a type 2 plot shows the mean decrease in Gini. We see both the plot agree that hearing location is the most important feature and Scheduled Hearing Location and Violation Amount are other important features.    
+
+```{r}
+trainIndex <- createDataPartition(sampledf$Hearing.Result, p = .8,
+                                  list = FALSE,
+                                  times = 1)
+traindf <- sampledf[trainIndex,]
+rf <- randomForest(Hearing.Result~., data=traindf,  importance = TRUE)
+varImpPlot(rf)
+importance(rf)
+```
+
+
+
+
+
+##SVM Implementation
+There are close to 170000 rows in the dataset. Also some description occur less than 10 times. We remove those descriptions. Then similar to the step we did for Issuing Agency we balance split on Code Description and then use that for our ngram analysis. 
+```{r}
+df2 <- df1[!(as.numeric(df1$Charge..1..Code.Description) %in% which(table(df1$Charge..1..Code.Description)<10)),]
+df2 <- droplevels(df2)
+pIndex <- createDataPartition(df2$Charge..1..Code.Description, p = .1,
+                                  list = FALSE,
+                                  times = 1)
+dfa <- df2[pIndex,]
+```
+
+Let's create document term matrix for svm implementation
+```{r}
+library(tm)
+library(SnowballC)
+library(tau)
+library(RWeka)
+descriptions <- data.frame((dfa$Charge..1..Code.Description))
+descriptions <- as.character(descriptions$X.dfa.Charge..1..Code.Description.)
+documents <- VCorpus(VectorSource(descriptions))
+documents <- tm_map(documents,
+                     content_transformer(function(x) iconv(x, to='UTF-8', sub='byte')),
+                     mc.cores=1)
+#remove symbols
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+documents <- tm_map(documents, toSpace, "/",mc.cores = 1)
+documents <- tm_map(documents, toSpace, "\\|", mc.cores = 1)
+removeURL <- function(x) gsub("http[[:alnum:]]*", "", x)
+documents <- tm_map(documents, content_transformer(removeURL))
+#convert to lowercase
+documents <- tm_map(documents, content_transformer(tolower),mc.cores = 1)
+# Remove numbers
+documents <- tm_map(documents, removeNumbers,mc.cores = 1)
+
+# Remove punctuations
+documents <- tm_map(documents, removePunctuation,mc.cores = 1)
+
+# Remove english common stopwords
+documents <- tm_map(documents, removeWords, stopwords("english"))
+# specify your stopwords as a character vector
+#documents <- tm_map(documents, removeWords, c("pizza","tco","eat")) 
+# Eliminate extra white spaces
+documents <- tm_map(documents, stripWhitespace, mc.cores = 1)
+# Text stemming
+documents <- tm_map(documents, stemDocument, lazy = T) 
+#create unigram matrix
+dtm <-(DocumentTermMatrix(documents))
+```
+
+```{r}
+#Bigrams
+BigramTokenizer <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min=2, max=2))}
+options(mc.cores=1)
+dtm2 <- DocumentTermMatrix(documents, control=list(tokenize=BigramTokenizer))
+#Trigrams
+#ThreegramTokenizer <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min=3, max=3))}
+#options(mc.cores=1)
+#dtm3 <- DocumentTermMatrix(documents, control=list(tokenize=ThreegramTokenizer))
+NgramTokenize <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min=1, max=2))}
+dtmn <- DocumentTermMatrix(documents, control=list(tokenize=NgramTokenize))
+trainIndex <- createDataPartition(dfa$Hearing.Result, p = .75,
+                                  list = FALSE,
+                                  times = 1)
+
+```
+
+```{r}
+m1 <- as.matrix(dtm)#unigram
+m2 <- as.matrix(dtm2)#bigram
+mn <- as.matrix(dtmn)
+df1 <- data.frame(m1,dfa$Hearing.Result) #unigramdf
+df2 <- data.frame(m2,dfa$Hearing.Result) #bigramdf
+dfn <- data.frame(mn,dfa$Hearing.Result) #bigramdf
+
+names(df1)[names(df1) == 'dfa.Hearing.Result'] <- 'Result'
+names(df2)[names(df2) == 'dfa.Hearing.Result'] <- 'Result'
+names(dfn)[names(dfn) == 'dfa.Hearing.Result'] <- 'Result'
+traindf1 <- df1[trainIndex,]
+testdf1 <- df1[-trainIndex,]
+traindf2 <- df2[trainIndex,]
+testdf2 <- df2[-trainIndex,]
+
+library("e1071")
+library("kernlab")
+svm_model1 <- svm(Result ~ ., data=traindf1) #unigramdf
+pred1 <- predict(svm_model1,testdf1)
+cm1 <- table(pred1,testdf1$Result)
+cm1
+sum(diag(cm1))/sum(cm1) #Accuracy unigram linear svm
+svm_model2 <- svm(Result ~ ., data=traindf2)#bigramdf
+pred2 <- predict(svm_model2,testdf2)
+cm2 <- table(pred2,testdf2$Result)
+cm2
+sum(diag(cm2))/sum(cm2) #Accuracy bigram linear svm
+```
+
+The  accuracy for unigram is clearly low. So let's change the kernel from linear to rbf 
+```{r}
+#rbf kernel
+svp <- ksvm(Result~., data= traindf1,type="C-svc",kernel='rbf',kpar=list(sigma=1),C=1)
+pred1 <- predict(svp,testdf1)
+cm1 <- table(pred1,testdf1$Result)
+cm1
+sum(diag(cm1))/sum(cm1)#Accuracy unigram rbf kernel
+svp <- ksvm(Result~., data= traindf2,type="C-svc",kernel='rbf',kpar=list(sigma=1),C=1)
+pred2 <- predict(svp,testdf2)
+cm2 <- table(pred2,testdf2$Result)
+cm2
+sum(diag(cm2))/sum(cm2) #Accuracy Bigram rbf
+```
+      
+We observe that the accuracy for unigram and bigram improves by about 0.05 when we change the kernel.
+
+
+
+#Visualization
+First Visualitation is for the Accuracies of 3 of the algorithms i.e Logistic Regression, Random Forest, K-NN Classification.It is a grouped bar plot and we observe the accuracy of Random Forest is slightly better than the other two.    
+##Accuracy Comparison    
+```{r}
+library(reshape2)
+folds <- 1:10
+mean(accuracyrf)#random forest accuracy averaged across folds
+mean(accuracylm)#logistic regression acccuracy averaged across folds
+mean(accuracy)#knn accuracy averaged across folds...
+comp<-data.frame(accuracy,accuracylm,accuracyrf,folds)
+colnames(comp)<- c("knn","logistic regresion","Random Forests", "folds")
+compfull <- melt(comp,id = c("folds"))
+colnames(compfull) <- c("folds","Model","Accuracy")
+compfull$folds <- as.factor(compfull$folds)
+ggplot(compfull, aes(factor(folds), Accuracy, fill = factor(Model)))+
+  labs(title="Accuracy Comparison") +
+  coord_cartesian(ylim=c(0.7,0.8)) +
+  theme(plot.title = element_text(hjust = 0.5))+ 
+  geom_bar(stat="identity", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1")
+```
+                              
+##Execution Time Comparison    
+Secondly we identify the execution time of each algorithm and plot them on the grouped bar plot. We find the logistic regression performs the best followed by random forest and knn.         
+```{r}
+folds <- 1:10
+comp<-data.frame(timeknn,timelm,timerf,folds)
+colnames(comp)<- c("knn","logistic regresion","Random Forests", "folds")
+compfull <- melt(comp,id = c("folds"))
+colnames(compfull) <- c("folds","Model","Time")
+compfull$folds <- as.factor(compfull$folds)
+ggplot(compfull, aes(folds, Time, fill = Model))+labs(title="Running Time Comparison") +ylim(0,35)+
+  theme(plot.title = element_text(hjust = 0.5))+ 
+  geom_bar(stat="identity", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1")
+```
+                 
+                 
+##Issuing Agencies Comparison    
+Last we plot stacked bar plot of top Issuing Agencies with The violation count on the y axis and the hearing result as the differentiatior. This graph helps us identify the issuing agencies who are more consistent in their Violation tickets and the we can also find out which agency's violations are dismissed more frequently which signifies they have higher error rate.   
+```{r}
+dfbar <- sampledf[!(as.numeric(sampledf$Issuing.Agency) %in% which(table(sampledf$Issuing.Agency)<500)),]
+dfbar <- droplevels(dfbar)
+issuingagency<-data.frame(unique(dfbar$Issuing.Agency),unique(abbreviate(dfbar$Issuing.Agency)))
+colnames(issuingagency)<-c("Name","Abbreviation")
+issuingagency
+qplot(abbreviate(Issuing.Agency), data=dfbar,geom="bar", fill=(Hearing.Result))+labs(title = "Violations issued by Issuing Agency")
+
+```
+
+##Contribution of n-grams to the outcome
+The y axis shows the relevant terms that are important in determining the Hearing Results...
+```{r}
+library(dplyr)
+library(tidytext)
+
+classes <- data.frame(rownames(dfa),dfa$Hearing.Result)
+colnames(classes) <- c("document","result")
+dtmn1 <- tidy(dtmn)
+mergedtmn <- merge(dtmn1,classes)
+dismissed<- dfn[dfn$Result %in% c("DISMISSED"),]
+violation <- dfn[dfn$Result %in% c("IN VIOLATION"),]
+dtmndis <-as.matrix( dtmn[rownames(dismissed),])
+dtmnvio <- as.matrix(dtmn[rownames(violation),])
+freqd <- sort(colSums(as.matrix(dtmndis)), decreasing=TRUE)   
+freqv <- sort(colSums(as.matrix(dtmnvio)), decreasing=TRUE)   
+head(freqd, 10) #10 most frequent features for Dismissed
+head(freqv, 10) #10 most frequent features for Violation
+mergedtmn %>%
+  count(result, term, wt = count) %>%
+  ungroup() %>%
+  filter(n >= 40) %>%
+  mutate(n = ifelse(result == "IN VIOLATION", -n, n)) %>%
+  mutate(term = reorder(term, n)) %>%
+  ggplot(aes(term, n, fill = result)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylab("Contribution to Hearing Result")
+```
